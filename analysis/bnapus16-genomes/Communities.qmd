@@ -17,6 +17,7 @@ library(tidyr)
 #library(pheatmap)
 library(ComplexHeatmap)
 library(circlize)
+library(ggplot2)
 ```
 
 ## Load data
@@ -165,6 +166,7 @@ Heatmap(
     labels_gp = gpar(fontsize = 28),
     title_gp  = gpar(fontsize = 20, fontface = "bold"),
     # size legend squares
+    
     grid_width  = unit(10, "mm"),
     grid_height = unit(10, "mm")
   ),
@@ -174,5 +176,100 @@ Heatmap(
 
 ```
 
-\
-\
+## Chromosome admixture index
+
+```{r community-mixture}
+
+comm3 <- comm2 %>%
+  mutate(
+    subgenome = toupper(substr(chromosome, 1, 1))
+  ) %>%
+  # keep only A and C subgenomes
+  filter(subgenome %in% c("A", "C"))
+
+# Summarise per community (across all genomes)
+comm_stats <- comm3 %>%
+  group_by(community_id, subgenome) %>%
+  summarise(bp = sum(bp_length), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = subgenome,
+    values_from = bp,
+    values_fill = 0,
+    names_prefix = "bp_"
+  ) %>%
+  mutate(
+    total_bp = bp_A + bp_C,
+    A_frac   = ifelse(total_bp > 0, bp_A / total_bp, NA_real_),
+    C_frac   = ifelse(total_bp > 0, bp_C / total_bp, NA_real_),
+    mixing_index = 2 * pmin(A_frac, C_frac) # 0 = pure, 1 = 50/50
+  )
+
+head(comm_stats)
+
+comm_sample_stats <- comm3 %>%
+  group_by(community_id, sample, subgenome) %>%
+  summarise(bp = sum(bp_length), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = subgenome,
+    values_from = bp,
+    values_fill = 0,
+    names_prefix = "bp_"
+  ) %>%
+  mutate(
+    total_bp = bp_A + bp_C,
+    A_frac   = ifelse(total_bp > 0, bp_A / total_bp, NA_real_),
+    C_frac   = ifelse(total_bp > 0, bp_C / total_bp, NA_real_),
+    mixing_index = 2 * pmin(A_frac, C_frac)
+  )
+
+head(comm_sample_stats)
+
+# plot the mixture index
+comm_long <- comm3 %>%
+  group_by(community_id, subgenome) %>%
+  summarise(bp = sum(bp_length), .groups = "drop") %>%
+  group_by(community_id) %>%
+  mutate(frac = bp / sum(bp))
+
+ggplot(comm_long, aes(x = factor(community_id), y = frac, fill = subgenome)) +
+  geom_col(color = "black") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    x = "Community",
+    y = "Subgenome fraction",
+    fill = "Subgenome"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+  )
+
+# Heatmap of mixing index (communities × genomes)
+mix_mat <- comm_sample_stats %>%
+  select(community_id, sample, mixing_index) %>%
+  tidyr::pivot_wider(
+    names_from = sample,
+    values_from = mixing_index,
+    values_fill = 0
+  )
+
+mix_mat_matrix <- as.matrix(mix_mat[,-1])
+rownames(mix_mat_matrix) <- mix_mat$community_id
+
+ht <- Heatmap(
+  mix_mat_matrix,
+  col = viridisLite::viridis(50),
+  name = "Mixing index A/C",     # <--- THIS sets the legend title properly
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  row_names_gp = gpar(fontsize = 10),
+  column_names_gp = gpar(fontsize = 10),
+   # ---- TILE BORDERS ----
+  border = TRUE,                       # simple, black thin borders
+  # OR customize:
+  rect_gp = gpar(col = "grey20", lwd = 0.5)   # color + line width
+)
+
+
+draw(ht, heatmap_legend_side = "right")
+```

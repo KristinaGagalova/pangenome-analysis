@@ -1,6 +1,7 @@
 # Chrosome pairs in communities
 
 - [Load data](#load-data)
+- [Chromosome admixture index](#chromosome-admixture-index)
 
 ``` r
 library(dplyr)
@@ -62,6 +63,12 @@ library(circlize)
     This message can be suppressed by:
       suppressPackageStartupMessages(library(circlize))
     ========================================
+
+``` r
+library(ggplot2)
+```
+
+    Warning: package 'ggplot2' was built under R version 4.3.3
 
 ## Load data
 
@@ -319,6 +326,7 @@ Heatmap(
     labels_gp = gpar(fontsize = 28),
     title_gp  = gpar(fontsize = 20, fontface = "bold"),
     # size legend squares
+    
     grid_width  = unit(10, "mm"),
     grid_height = unit(10, "mm")
   ),
@@ -330,5 +338,129 @@ Heatmap(
 <img src="Communities_files/figure-commonmark/plotHeatmap-1.png"
 data-fig-align="center" />
 
-  
-  
+## Chromosome admixture index
+
+``` r
+comm3 <- comm2 %>%
+  mutate(
+    subgenome = toupper(substr(chromosome, 1, 1))
+  ) %>%
+  # keep only A and C subgenomes
+  filter(subgenome %in% c("A", "C"))
+
+# Summarise per community (across all genomes)
+comm_stats <- comm3 %>%
+  group_by(community_id, subgenome) %>%
+  summarise(bp = sum(bp_length), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = subgenome,
+    values_from = bp,
+    values_fill = 0,
+    names_prefix = "bp_"
+  ) %>%
+  mutate(
+    total_bp = bp_A + bp_C,
+    A_frac   = ifelse(total_bp > 0, bp_A / total_bp, NA_real_),
+    C_frac   = ifelse(total_bp > 0, bp_C / total_bp, NA_real_),
+    mixing_index = 2 * pmin(A_frac, C_frac) # 0 = pure, 1 = 50/50
+  )
+
+head(comm_stats)
+```
+
+    # A tibble: 6 × 7
+      community_id      bp_A       bp_C   total_bp A_frac C_frac mixing_index
+             <int>     <int>      <int>      <int>  <dbl>  <dbl>        <dbl>
+    1            0 621532023  913064780 1534596803  0.405  0.595        0.810
+    2            1 564024336  819607270 1383631606  0.408  0.592        0.815
+    3            2 671663208 1201748725 1873411933  0.359  0.641        0.717
+    4            3 417196318 1028683641 1445879959  0.289  0.711        0.577
+    5            4 578131398  960001819 1538133217  0.376  0.624        0.752
+    6            5 712351065          0  712351065  1      0            0    
+
+``` r
+comm_sample_stats <- comm3 %>%
+  group_by(community_id, sample, subgenome) %>%
+  summarise(bp = sum(bp_length), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = subgenome,
+    values_from = bp,
+    values_fill = 0,
+    names_prefix = "bp_"
+  ) %>%
+  mutate(
+    total_bp = bp_A + bp_C,
+    A_frac   = ifelse(total_bp > 0, bp_A / total_bp, NA_real_),
+    C_frac   = ifelse(total_bp > 0, bp_C / total_bp, NA_real_),
+    mixing_index = 2 * pmin(A_frac, C_frac)
+  )
+
+head(comm_sample_stats)
+```
+
+    # A tibble: 6 × 8
+      community_id sample         bp_A     bp_C total_bp A_frac C_frac mixing_index
+             <int> <chr>         <int>    <int>    <int>  <dbl>  <dbl>        <dbl>
+    1            0 BnXiaoyun  32420360 63671054 96091414  0.337  0.663        0.675
+    2            0 Da-Ae      29581582 58167434 87749016  0.337  0.663        0.674
+    3            0 Darmor     33432960 62297340 95730300  0.349  0.651        0.698
+    4            0 Express617 30174133 61556739 91730872  0.329  0.671        0.658
+    5            0 GH06       33077142 51306662 84383804  0.392  0.608        0.784
+    6            0 GanganF73  34912047 62611365 97523412  0.358  0.642        0.716
+
+``` r
+# plot the mixture index
+comm_long <- comm3 %>%
+  group_by(community_id, subgenome) %>%
+  summarise(bp = sum(bp_length), .groups = "drop") %>%
+  group_by(community_id) %>%
+  mutate(frac = bp / sum(bp))
+
+ggplot(comm_long, aes(x = factor(community_id), y = frac, fill = subgenome)) +
+  geom_col(color = "black") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    x = "Community",
+    y = "Subgenome fraction",
+    fill = "Subgenome"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+  )
+```
+
+![](Communities_files/figure-commonmark/community-mixture-1.png)
+
+``` r
+# Heatmap of mixing index (communities × genomes)
+mix_mat <- comm_sample_stats %>%
+  select(community_id, sample, mixing_index) %>%
+  tidyr::pivot_wider(
+    names_from = sample,
+    values_from = mixing_index,
+    values_fill = 0
+  )
+
+mix_mat_matrix <- as.matrix(mix_mat[,-1])
+rownames(mix_mat_matrix) <- mix_mat$community_id
+
+ht <- Heatmap(
+  mix_mat_matrix,
+  col = viridisLite::viridis(50),
+  name = "Mixing index A/C",     # <--- THIS sets the legend title properly
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  row_names_gp = gpar(fontsize = 10),
+  column_names_gp = gpar(fontsize = 10),
+   # ---- TILE BORDERS ----
+  border = TRUE,                       # simple, black thin borders
+  # OR customize:
+  rect_gp = gpar(col = "grey20", lwd = 0.5)   # color + line width
+)
+
+
+draw(ht, heatmap_legend_side = "right")
+```
+
+![](Communities_files/figure-commonmark/community-mixture-2.png)
