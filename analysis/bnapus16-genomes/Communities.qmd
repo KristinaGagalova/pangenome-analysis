@@ -1,0 +1,178 @@
+---
+title: "Chrosome pairs in communities"
+format:
+  gfm:
+    toc: true
+    code-tools: true
+    fig-dir: "figs"
+execute:
+  echo: true
+editor: visual
+---
+
+```{r load_libraries}
+library(dplyr)
+library(purrr)
+library(tidyr)
+#library(pheatmap)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+## Load data
+
+```{r loadData}
+comm <- read.delim2("data/community_segments.tsv")
+# remove the random ones
+comm2 <- comm %>%
+  filter(
+    !grepl("Random", chromosome, ignore.case = TRUE),
+    !grepl("^R", chromosome)
+  )
+```
+
+```{r plotHeatmap, fig.width=12, fig.height=12, fig.align='center'}
+
+# df must have: community_id, chromosome, bp_length
+chrom_cooccurrence <- function(df) {
+  # 1) Aggregate per community × chromosome
+  df_comm_chr <- df %>%
+    group_by(community_id, chromosome) %>%
+    summarise(bp = sum(bp_length), .groups = "drop")
+  
+  # All chromosomes
+  chroms <- sort(unique(df_comm_chr$chromosome))
+  n_chr  <- length(chroms)
+  
+  # 2) Initialise matrices
+  cooc_unweighted <- matrix(
+    0, nrow = n_chr, ncol = n_chr,
+    dimnames = list(chroms, chroms)
+  )
+  
+  cooc_weighted <- matrix(
+    0, nrow = n_chr, ncol = n_chr,
+    dimnames = list(chroms, chroms)
+  )
+  
+  # 3) Loop over communities
+  comm_ids <- unique(df_comm_chr$community_id)
+  
+  for (comm in comm_ids) {
+    sub <- df_comm_chr[df_comm_chr$community_id == comm, ]
+    
+    # Only keep unique chromosomes in this community
+    # with their total bp
+    sub <- sub %>%
+      arrange(chromosome)
+    
+    if (nrow(sub) < 2L) next  # need at least two chromosomes to "mix"
+    
+    # Indices of chromosomes in the global vector
+    idx <- match(sub$chromosome, chroms)
+    
+    # All unordered pairs (i < j)
+    pairs <- t(combn(seq_along(idx), 2))
+    
+    # Unweighted: +1 for each pair (community counts)
+    for (k in seq_len(nrow(pairs))) {
+      i_local <- pairs[k, 1]
+      j_local <- pairs[k, 2]
+      
+      i <- idx[i_local]
+      j <- idx[j_local]
+      
+      # Unweighted: just "this community has i & j"
+      cooc_unweighted[i, j] <- cooc_unweighted[i, j] + 1
+      cooc_unweighted[j, i] <- cooc_unweighted[j, i] + 1
+      
+      # Weighted: add min(bp_i, bp_j) for this community
+      bp_i <- sub$bp[i_local]
+      bp_j <- sub$bp[j_local]
+      w    <- min(bp_i, bp_j)
+      
+      cooc_weighted[i, j] <- cooc_weighted[i, j] + w
+      cooc_weighted[j, i] <- cooc_weighted[j, i] + w
+    }
+  }
+  
+  # 4) Diagonal (optional)
+  # Unweighted diagonal = number of communities where each chromosome appears
+  # Weighted diagonal   = total bp of each chromosome
+  chr_communities <- df_comm_chr %>%
+    group_by(chromosome) %>%
+    summarise(n_comm = n_distinct(community_id),
+              total_bp = sum(bp), .groups = "drop")
+  
+  idx_diag <- match(chr_communities$chromosome, chroms)
+  cooc_unweighted[cbind(idx_diag, idx_diag)] <- chr_communities$n_comm
+  cooc_weighted[cbind(idx_diag, idx_diag)]   <- chr_communities$total_bp
+  
+  list(
+    unweighted = cooc_unweighted,
+    weighted   = cooc_weighted,
+    chrom_summary = chr_communities
+  )
+}
+
+# Run the function
+res <- chrom_cooccurrence(comm2)
+
+# Unweighted co-occurrence matrix:
+res$unweighted
+
+# Weighted (bp-based) co-occurrence matrix:
+res$weighted
+
+# Per-chromosome summary (how many communities, total bp, etc.):
+res$chrom_summary
+
+# Matrix: weighted or unweighted
+mat <- res$unweighted  # or res$unweighted
+
+mat <- res$unweighted
+vals <- sort(unique(as.vector(mat)))
+
+# discrete palette
+# my recommended palette: magma or inferno
+pal <- colorRampPalette(c("#fee8c8", "#fdbb84", "#e34a33"))(length(vals))
+names(pal) <- vals  # map value -> color
+
+# mask lower-triangle including diagonal (NA hides cells)
+mat_mask <- mat
+mat_mask[upper.tri(mat_mask, diag = TRUE)] <- NA
+Heatmap(
+  mat_mask,
+  col = pal,
+  na_col = "white",
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+
+  # LABELS
+  row_names_side = "left",
+  row_names_rot = 0,
+  row_names_gp = gpar(fontsize = 24),
+
+  column_names_side = "bottom",
+  column_names_rot = 45,
+  column_names_gp = gpar(fontsize = 24),
+
+  # LEGEND
+  heatmap_legend_param = list(
+    at = vals,
+    labels = vals,
+    title = "",
+    labels_gp = gpar(fontsize = 28),
+    title_gp  = gpar(fontsize = 20, fontface = "bold"),
+    # size legend squares
+    grid_width  = unit(10, "mm"),
+    grid_height = unit(10, "mm")
+  ),
+
+  name = "mix"
+)
+
+```
+
+\
+\
