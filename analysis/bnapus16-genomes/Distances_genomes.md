@@ -1,0 +1,88 @@
+# Distances_genomes
+
+- [Plot distances](#plot-distances)
+
+``` r
+# Install packages once if needed:
+# install.packages(c("ape", "ggplot2", "ggrepel"))
+
+library(ape)
+```
+
+    Warning: package 'ape' was built under R version 4.3.3
+
+``` r
+library(ggplot2)
+```
+
+    Warning: package 'ggplot2' was built under R version 4.3.3
+
+``` r
+library(ggrepel)
+```
+
+## Plot distances
+
+``` r
+# 1. Read the distance matrix
+dist_mat <- read.table(
+  "data/bnaipus16_distances.tab",
+  header = TRUE,
+  row.names = 1,
+  check.names = FALSE
+)
+
+# 2. Make sure column names match row names (same order)
+colnames(dist_mat) <- rownames(dist_mat)
+
+# OPTIONAL: check it’s symmetric
+all(rownames(dist_mat) == colnames(dist_mat))
+```
+
+    [1] TRUE
+
+``` r
+# 3. Run PCoA (ape::pcoa)
+dist_obj <- as.dist(dist_mat)
+pcoa_res <- pcoa(dist_obj)
+
+# 4. Build a data frame for plotting
+pcoa_df <- as.data.frame(pcoa_res$vectors[, 1:2])
+pcoa_df$variety <- rownames(pcoa_df)
+
+# 5. Plot with ggplot
+ggplot(pcoa_df, aes(x = Axis.1, y = Axis.2, label = variety)) +
+  
+  # Draw large points
+  geom_point(size = 10, alpha = 0.3) +
+  
+  # Repel text away from points & other labels
+  geom_text_repel(
+    size = 6, 
+    fontface = "bold",
+    box.padding = 1.0,       # push text away from point
+    point.padding = 0.8,     # treat point as having width/height
+    min.segment.length = 0,
+    max.overlaps = Inf
+  ) +
+
+  theme_minimal(base_size = 20) +
+  theme(
+    axis.title = element_text(size = 24, face = "bold"),
+    axis.text = element_text(size = 20),
+    plot.title = element_text(size = 26, face = "bold", hjust = 0.5)
+  ) +
+  labs(
+    x = "PCoA 1",
+    y = "PCoA 2",
+    title = bquote(italic(B.~napus) ~ "reference varieties")
+  )
+```
+
+<img src="Distances_genomes_files/figure-commonmark/plot-pcoa-1.png"
+data-fig-align="center" />
+
+``` r
+# 6. Save the plot to a file (so you can open it)
+#ggsave("bnapus_pcoa.png", plot = p, width = 6, height = 5, dpi = 300)
+```
