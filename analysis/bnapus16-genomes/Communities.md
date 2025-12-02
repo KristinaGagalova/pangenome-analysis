@@ -447,7 +447,10 @@ rownames(mix_mat_matrix) <- mix_mat$community_id
 
 ht <- Heatmap(
   mix_mat_matrix,
-  col = viridisLite::viridis(50),
+  col_fun <- circlize::colorRamp2(
+  c(min(mix_mat_matrix), mean(mix_mat_matrix), max(mix_mat_matrix)),
+  c("#56B4E9", "white", "#E69F00")
+  ),
   name = "Mixing index A/C",     # <--- THIS sets the legend title properly
   cluster_rows = TRUE,
   cluster_columns = TRUE,
