@@ -30,7 +30,7 @@ outFile  <- file.path(dataPath, "bnapus_all_idxstats_merged.tsv")
 
 allFiles <- list.files(
   path       = dataPath,
-  pattern    = "^bnapus_[^_]+_[AC]\\d+\\.sorted\\.idxstats\\.txt$",
+  pattern    = "^bnapus_[^_]+_[AC]\\d+\\.sorted\\.idxstats\\.txt.gz$",
   full.names = TRUE
 )
 
@@ -39,14 +39,17 @@ allFiles <- list.files(
 #   reference  length  mapped  unmapped
 # but headers are not present, so we assign them.
 merged_idxstats <- map_dfr(allFiles, function(fn) {
+
   d <- read_tsv(
     fn,
     col_names = c("reference", "length", "mapped", "unmapped"),
     show_col_types = FALSE
   )
 
-  d$fileName <- fn
-  d
+  d %>%
+    mutate(
+      fileName = fn
+    )
 })
 
 # ---- extract expected chromosome from filename ----
@@ -55,12 +58,12 @@ file_base <- basename(merged_idxstats$fileName)
 # Extract e.g. "C07" / "C08" from "bnapus_C07.sorted.idxstats.txt"
 merged_idxstats$expected_chromosome <- str_match(
   file_base,
-  "^bnapus_[^_]+_([AC]\\d+)\\.sorted\\.idxstats\\.txt$"
+  "^bnapus_[^_]+_([AC]\\d+)\\.sorted\\.idxstats\\.txt.gz$"
 )[, 2]
 
 merged_idxstats$variety <- str_match(
   file_base,
-  "^bnapus_([^_]+)_[AC]\\d+\\.sorted\\.idxstats\\.txt$"
+  "^bnapus_([^_]+)_[AC]\\d+\\.sorted\\.idxstats\\.txt.gz$"
 )[, 2]
 
 # Optional: reorder columns nicely
