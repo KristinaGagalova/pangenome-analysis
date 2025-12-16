@@ -1,0 +1,181 @@
+---
+title: "Probes-mapping"
+format:
+  gfm:
+    toc: true
+    code-tools: true
+    fig-dir: "figs"
+execute:
+  echo: true
+editor: visual
+---
+
+## Libraries
+
+```{r}
+library(dplyr)
+library(stringr)
+library(readr)
+library(purrr)
+library(ggplot2)
+```
+
+## Load data
+
+```{r load.data}
+
+# ---- settings ----
+dataPath <- "data/probes"   # folder that contains: bnapus_C07.sorted.idxstats.txt, ...
+outFile  <- file.path(dataPath, "bnapus_all_idxstats_merged.tsv")
+
+allFiles <- list.files(
+  path       = dataPath,
+  pattern    = "^bnapus_[^_]+_[AC]\\d+\\.sorted\\.idxstats\\.txt$",
+  full.names = TRUE
+)
+
+# ---- load & merge ----
+# samtools idxstats format is typically:
+#   reference  length  mapped  unmapped
+# but headers are not present, so we assign them.
+merged_idxstats <- map_dfr(allFiles, function(fn) {
+  d <- read_tsv(
+    fn,
+    col_names = c("reference", "length", "mapped", "unmapped"),
+    show_col_types = FALSE
+  )
+
+  d$fileName <- fn
+  d
+})
+
+# ---- extract expected chromosome from filename ----
+file_base <- basename(merged_idxstats$fileName)
+
+# Extract e.g. "C07" / "C08" from "bnapus_C07.sorted.idxstats.txt"
+merged_idxstats$expected_chromosome <- str_match(
+  file_base,
+  "^bnapus_[^_]+_([AC]\\d+)\\.sorted\\.idxstats\\.txt$"
+)[, 2]
+
+merged_idxstats$variety <- str_match(
+  file_base,
+  "^bnapus_([^_]+)_[AC]\\d+\\.sorted\\.idxstats\\.txt$"
+)[, 2]
+
+# Optional: reorder columns nicely
+merged_idxstats <- merged_idxstats %>%
+  select(expected_chromosome, variety, reference, length, mapped, unmapped, fileName)
+```
+
+## Plot expected mapping per variety
+
+```{r plot.mappings, fig.width=12, fig.height=12, fig.align='center'}
+
+
+df2 <- merged_idxstats %>%
+  # remove scaffold rows
+  filter(!str_detect(reference, regex("scaffold", ignore_case = TRUE))) %>%
+  # rename '*' reference to 'unmapped'
+  mutate(reference = if_else(reference == "*", "U", reference)) %>%
+  # make sure numeric columns are numeric
+  mutate(
+    length   = as.numeric(length),
+    mapped   = as.numeric(mapped),
+    unmapped = as.numeric(unmapped)
+  ) %>%
+  mutate(
+    reference_chr = str_extract(reference, "[^#]+$")
+  )
+
+# plot: mapped reads per reference
+p <- df2 %>%
+  ggplot(aes(x = reference_chr, y = mapped)) +
+  geom_col() +
+  facet_grid(expected_chromosome ~ variety, scales = "free_x", space = "free_x") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.spacing = unit(0.6, "lines")
+  ) +
+  labs(x = "Expected", y = "Observed mapped probes")
+
+p
+
+## percentage plotting
+
+df3 <- merged_idxstats %>%
+  # remove scaffold rows
+  filter(!str_detect(reference, regex("scaffold", ignore_case = TRUE))) %>%
+  # rename '*' reference to 'unmapped'
+  mutate(reference = if_else(reference == "*", "U", reference)) %>%
+  mutate(
+    mapped = as.numeric(mapped),
+    unmapped = as.numeric(unmapped)
+  ) %>%
+  group_by(expected_chromosome, variety) %>%
+  mutate(
+    pct_expected = 100 * mapped / sum(mapped, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    reference_chr = str_extract(reference, "[^#]+$")
+  )
+
+p2 <- ggplot(df3, aes(x = reference_chr, y = pct_expected)) +
+  geom_col() +
+  facet_grid(expected_chromosome ~ variety, scales = "free_x", space = "free_x") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.spacing = unit(0.6, "lines")
+  ) +
+  labs(x = "Expected", y = "Observed % of mapped probes")
+
+p2
+```
+
+```{r offtarget.estimate}
+
+
+# ---- off-target calculation ----
+off_target <- df3 %>%
+  filter(reference_chr != "unmapped") %>%   # ignore unmapped for off-target
+  group_by(variety) %>%
+  summarise(
+    total_mapped = sum(mapped, na.rm = TRUE),
+    off_target_mapped = sum(
+      mapped[reference_chr != expected_chromosome],
+      na.rm = TRUE
+    ),
+    off_target_percent = 100 * off_target_mapped / total_mapped
+  )
+
+off_target
+
+
+
+off_target_chr <- df3 %>%
+  filter(reference_chr != "unmapped") %>%   # exclude unmapped from denominator
+  group_by(variety, expected_chromosome) %>%
+  summarise(
+    total_mapped = sum(mapped, na.rm = TRUE),
+    off_target_mapped = sum(
+      mapped[reference_chr != expected_chromosome],
+      na.rm = TRUE
+    ),
+    off_target_percent = 100 * off_target_mapped / total_mapped,
+    .groups = "drop"
+  )
+
+off_target_chr <- off_target_chr %>%
+  group_by(variety) %>%
+  arrange(desc(off_target_percent), .by_group = TRUE) %>%
+  ungroup()
+
+
+print(off_target_chr, n = Inf)
+
+```
+
+\
