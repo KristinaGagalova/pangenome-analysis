@@ -1,0 +1,212 @@
+#!/bin/bash --login
+set -u
+set -o pipefail
+
+# -------------------- CONFIG --------------------
+PROBES=/scratch/pawsey1142/kgagalova/pangenomes/probes_bnapus/fatsq_probes/snpdb_all_src_from_file.fq.gz
+GENOME_DIR=/scratch/pawsey1142/kgagalova/pangenomes/genomes/select_scaffolds/phylogeny
+OUTDIR=/scratch/pawsey1142/kgagalova/pangenomes/minigraph-cactus/mapping_linear
+THREADS=16
+# ------------------------------------------------
+
+module load bwa-mem2/2.2.1--hd03093a_2
+module load samtools/1.15--h3843a85_0
+
+mkdir -p "${OUTDIR}"/{bam,sam,stats,tmp}
+
+TOTAL_READS=$(zcat "${PROBES}" | awk 'END{print NR/4}')
+echo "Total probes/reads in FASTQ: ${TOTAL_READS}"
+
+# Summary header (note: includes total_reads from FASTQ + per-genome totals from SAM parsing)
+echo -e "genome\ttotal_reads_fastq\ttotal_reads_in_sam\tmapped_unique_reads\tunmapped_unique_reads\treads_with_any_ON\treads_with_any_OFF\ton_only\toff_only\tboth_on_and_off\ttotal_mapped_alignments\tstatus" \
+  > "${OUTDIR}/mapping_summary.tsv"
+
+: > "${OUTDIR}/tmp/mapped_any_genome.readnames"
+: > "${OUTDIR}/failed_genomes.txt"
+
+shopt -s nullglob
+refs=( "${GENOME_DIR}"/*.fa "${GENOME_DIR}"/*.fasta "${GENOME_DIR}"/*.fna )
+
+if [[ ${#refs[@]} -eq 0 ]]; then
+  echo "ERROR: No FASTA files found in ${GENOME_DIR} with extensions .fa/.fasta/.fna"
+  exit 1
+fi
+
+for ref in "${refs[@]}"; do
+  fname=$(basename "${ref}")
+  base="${fname%.*}"
+
+  bam="${OUTDIR}/bam/${base}.sorted.bam"
+  sam="${OUTDIR}/sam/${base}.sam"
+  outprefix="${OUTDIR}/stats/${base}"
+
+  echo "=== Mapping to ${fname} ==="
+
+  idx_check="${ref}.bwt.2bit.64"
+  if [[ ! -e "${idx_check}" ]]; then
+    echo "WARNING: Missing bwa-mem2 index for ${ref} (expected ${idx_check}). Skipping."
+    echo -e "${base}\t${TOTAL_READS}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tSKIPPED_no_index" \
+      >> "${OUTDIR}/mapping_summary.tsv"
+    continue
+  fi
+
+  if ! bwa-mem2 mem -a -t "${THREADS}" "${ref}" "${PROBES}" \
+      | samtools sort -@ "${THREADS}" -o "${bam}" - ; then
+    echo "ERROR: Mapping failed for ${ref}. Continuing."
+    echo "${ref}" >> "${OUTDIR}/failed_genomes.txt"
+    echo -e "${base}\t${TOTAL_READS}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tFAILED_mapping" \
+      >> "${OUTDIR}/mapping_summary.tsv"
+    continue
+  fi
+
+  if ! samtools index "${bam}"; then
+    echo "ERROR: samtools index failed for ${bam}. Continuing."
+    echo "${ref}" >> "${OUTDIR}/failed_genomes.txt"
+    echo -e "${base}\t${TOTAL_READS}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tFAILED_index" \
+      >> "${OUTDIR}/mapping_summary.tsv"
+    continue
+  fi
+
+  samtools idxstats "${bam}" > "${OUTDIR}/stats/${base}.idxstats.tsv" || true
+  samtools flagstat "${bam}" > "${OUTDIR}/stats/${base}.flagstat.txt" || true
+
+  if ! samtools view -h "${bam}" > "${sam}"; then
+    echo "ERROR: samtools view failed to write SAM for ${bam}. Continuing."
+    echo "${ref}" >> "${OUTDIR}/failed_genomes.txt"
+    echo -e "${base}\t${TOTAL_READS}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tFAILED_sam_dump" \
+      >> "${OUTDIR}/mapping_summary.tsv"
+    continue
+  fi
+
+  # Parse SAM using: expected from QNAME src=snpdb_C05, observed from RNAME (col 3)
+  if ! python3 - "${sam}" "${outprefix}" <<'PY'
+import sys, re
+from collections import defaultdict
+
+sam_path = sys.argv[1]
+outprefix = sys.argv[2]
+
+def expected_from_qname_src(qname: str) -> str:
+    src_val = ""
+    for part in qname.split("|"):
+        if part.startswith("src="):
+            src_val = part.split("=", 1)[1]
+            break
+    if not src_val:
+        return ""
+    m = re.search(r"([AC]\d{1,2})$", src_val)
+    if not m:
+        return ""
+    letter = m.group(1)[0]
+    num = int(m.group(1)[1:])
+    return f"{letter}{num:02d}"
+
+def observed_from_rname(rname: str) -> str:
+    if not rname or rname == "*":
+        return ""
+    if "#" in rname:
+        rname = rname.split("#")[-1]
+    m = re.match(r"^([AC])(\d{1,2})$", rname)
+    if m:
+        letter, num = m.group(1), int(m.group(2))
+        return f"{letter}{num:02d}"
+    return rname
+
+all_reads = set()
+mapped_reads = set()
+on = set()
+off = set()
+off_contig = defaultdict(int)
+total_align = 0
+
+with open(sam_path, "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        if not line or line.startswith("@"):
+            continue
+        f = line.rstrip("\n").split("\t")
+        if len(f) < 3:
+            continue
+
+        q = f[0]
+        try:
+            flag = int(f[1])
+        except ValueError:
+            continue
+        r_full = f[2]
+
+        all_reads.add(q)
+
+        if (flag & 0x4) or r_full == "*":
+            continue
+
+        mapped_reads.add(q)
+        total_align += 1
+
+        exp = expected_from_qname_src(q)
+        if not exp:
+            # still counted as mapped; just not classifiable as ON/OFF
+            continue
+
+        obs = observed_from_rname(r_full)
+
+        if obs == exp:
+            on.add(q)
+        else:
+            off.add(q)
+            off_contig[r_full] += 1
+
+total_reads = len(all_reads)
+m = len(mapped_reads)
+unmapped = total_reads - m
+
+any_on = len(on)
+any_off = len(off)
+
+both = sum((q in on) and (q in off) for q in mapped_reads)
+on_only = sum((q in on) and (q not in off) for q in mapped_reads)
+off_only = sum((q in off) and (q not in on) for q in mapped_reads)
+
+with open(outprefix + ".counts.tsv", "w") as out:
+    out.write(f"{total_reads}\t{m}\t{unmapped}\t{any_on}\t{any_off}\t{on_only}\t{off_only}\t{both}\t{total_align}\n")
+
+with open(outprefix + ".offtarget_contigs.tsv", "w") as out:
+    for contig, cnt in off_contig.items():
+        out.write(f"{cnt}\t{contig}\n")
+PY
+  then
+    echo "ERROR: Python parsing failed for ${sam}. Continuing."
+    echo "${ref}" >> "${OUTDIR}/failed_genomes.txt"
+    echo -e "${base}\t${TOTAL_READS}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tFAILED_parse" \
+      >> "${OUTDIR}/mapping_summary.tsv"
+    continue
+  fi
+
+  # Read parsed outputs
+  read total_reads_in_sam m unmapped any_on any_off on_only off_only both total_align < "${outprefix}.counts.tsv"
+
+  # Union of mapped reads across genomes (mapped only)
+  samtools view -F 4 "${bam}" | cut -f1 | sort -u >> "${OUTDIR}/tmp/mapped_any_genome.readnames"
+
+  echo -e "${base}\t${TOTAL_READS}\t${total_reads_in_sam}\t${m}\t${unmapped}\t${any_on}\t${any_off}\t${on_only}\t${off_only}\t${both}\t${total_align}\tOK" \
+    >> "${OUTDIR}/mapping_summary.tsv"
+
+  if [[ -s "${outprefix}.offtarget_contigs.tsv" ]]; then
+    sort -nr "${outprefix}.offtarget_contigs.tsv" | head -50 > "${outprefix}.offtarget_contigs.top50.tsv"
+  else
+    : > "${outprefix}.offtarget_contigs.top50.tsv"
+  fi
+done
+
+# Overall: probes mapping to at least one genome (unique readnames across all genomes)
+sort -u "${OUTDIR}/tmp/mapped_any_genome.readnames" > "${OUTDIR}/mapped_to_any_genome.unique.readnames"
+MAPPED_ANY_GENOME=$(wc -l < "${OUTDIR}/mapped_to_any_genome.unique.readnames")
+
+{
+  echo ""
+  echo -e "OVERALL_any_genome\t${TOTAL_READS}\tNA\t${MAPPED_ANY_GENOME}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tOK"
+} >> "${OUTDIR}/mapping_summary.tsv"
+
+echo "Done."
+echo "Summary: ${OUTDIR}/mapping_summary.tsv"
+echo "SAM files: ${OUTDIR}/sam/"
+echo "Failed genomes (if any): ${OUTDIR}/failed_genomes.txt"
