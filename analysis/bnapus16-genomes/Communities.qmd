@@ -141,7 +141,7 @@ names(pal) <- vals  # map value -> color
 
 # mask lower-triangle including diagonal (NA hides cells)
 mat_mask <- mat
-mat_mask[upper.tri(mat_mask, diag = TRUE)] <- NA
+mat_mask[upper.tri(mat_mask, diag = FALSE)] <- NA
 Heatmap(
   mat_mask,
   col = pal,
